@@ -1,6 +1,10 @@
 from openai import OpenAI
 from dotenv import load_dotenv
 import os
+import requests
+from PIL import Image, ImageDraw, ImageFont
+from io import BytesIO
+import textwrap
 
 # Load environment variables
 load_dotenv()
@@ -20,7 +24,7 @@ def clarity_agent(user_input):
         clarity_response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a clarity agent for a biopharma content team. Your role is to understand and clarify the user's content needs."},
+                {"role": "system", "content": "You are a clarity agent. Your role is to understand and enhance the user's image description while maintaining their exact requirements. Do not change the theme or core elements of their request."},
                 {"role": "user", "content": user_input}
             ]
         )
@@ -38,8 +42,8 @@ def creator_agent(clarity_output):
         prompt_response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a prompt engineer for DALL-E 3. Create a detailed, clear prompt that will generate a professional biopharma-related image."},
-                {"role": "user", "content": f"Convert these requirements into a DALL-E 3 prompt: {clarity_output}"}
+                {"role": "system", "content": "You are a prompt engineer for DALL-E 3. Your role is to enhance the given image description to create a more detailed and vivid prompt, while maintaining the original intent and core elements exactly as specified. Do not change the fundamental elements or theme of the request."},
+                {"role": "user", "content": f"Enhance this image description into a detailed DALL-E prompt while keeping all original elements: {clarity_output}"}
             ]
         )
         
@@ -88,10 +92,68 @@ def copy_agent(clarity_output, creator_output):
         print(f"Error in Copy Agent: {e}")
         raise
 
+def download_image(url):
+    """Download image from URL"""
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        return Image.open(BytesIO(response.content))
+    except Exception as e:
+        print(f"Error downloading image: {e}")
+        raise
+
+def add_text_to_image(image, key_message, clarity_output):
+    """Add text to image in a visually appealing way"""
+    # Create a new image with extra space for text
+    margin = 50
+    spacing = 30
+    text_height = 200  # Space for text below image
+    
+    # Create new white canvas
+    new_img = Image.new('RGB', (image.width + 2*margin, image.height + text_height + 2*margin), 'white')
+    
+    # Paste original image
+    new_img.paste(image, (margin, margin))
+    
+    # Prepare for text drawing
+    draw = ImageDraw.Draw(new_img)
+    
+    try:
+        # Try to load a nice font, fall back to default if not available
+        font_large = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 36)
+        font_small = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 24)
+    except:
+        font_large = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+    
+    # Add key message
+    wrapped_key_message = textwrap.fill(key_message, width=50)
+    draw.text((margin, image.height + margin + spacing), 
+              wrapped_key_message, 
+              font=font_large, 
+              fill='black')
+    
+    return new_img
+
+def save_final_content(image, output_dir="output"):
+    """Save the final image to the output directory"""
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Generate unique filename using timestamp
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{output_dir}/content_{timestamp}.png"
+    
+    # Save image
+    image.save(filename)
+    return filename
+
 def assembler_agent(creator_output, clarity_output, copy_output, user_input):
     """Final agent to format and assemble the final content"""
     print("\nAssembler Agent starting...")
     try:
+        # First, get the formatted text output
         assembler_response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -101,14 +163,28 @@ def assembler_agent(creator_output, clarity_output, copy_output, user_input):
 Original Request: {user_input}
 Clarified Requirements: {clarity_output}
 Key Message: {copy_output}
-Generated Image: {creator_output['image_url']}
 Image Prompt Used: {creator_output['prompt_used']}
 
-Please structure this into a professional document with clear sections, including where the image should be placed."""}
+Please structure this into a professional document with clear sections."""}
             ]
         )
+        
+        # Download and process the image
+        image = download_image(creator_output['image_url'])
+        
+        # Add text to image
+        final_image = add_text_to_image(image, copy_output, clarity_output)
+        
+        # Save the final content
+        output_file = save_final_content(final_image)
+        
         print("Assembler Agent completed successfully")
-        return assembler_response.choices[0].message.content
+        print(f"Final content saved to: {output_file}")
+        
+        return {
+            'text_content': assembler_response.choices[0].message.content,
+            'image_path': output_file
+        }
     except Exception as e:
         print(f"Error in Assembler Agent: {e}")
         raise
@@ -134,10 +210,20 @@ def main():
         
         # Step 4: Assembler Agent
         final_output = assembler_agent(creator_output, clarity_output, copy_output, user_input)
-        print("Final Assembled Output:\n", final_output)
+        print("\nFinal Text Content:\n", final_output['text_content'])
+        print(f"\nFinal image with text has been saved to: {final_output['image_path']}")
+        
+        # Try to open the generated image
+        try:
+            import subprocess
+            subprocess.run(['open', final_output['image_path']])
+            print("\nOpening the generated image...")
+        except Exception as e:
+            print(f"\nCouldn't automatically open the image: {e}")
+            print("Please open the image manually from the output directory")
         
     except Exception as e:
         print(f"\nError in main execution: {e}")
 
 if __name__ == "__main__":
-    main() 
+    main()
